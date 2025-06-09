@@ -1,8 +1,8 @@
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from transformers import T5Tokenizer, T5ForConditionalGeneration
-import torch
 from PIL import Image
 import pytesseract
 import io
@@ -11,16 +11,14 @@ import os
 import uuid
 from datetime import datetime
 import logging
+import cv2
+import numpy as np
 from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure Tesseract path for Windows
-if os.name == 'nt':  # Windows
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    logger.info("Configured Tesseract path for Windows")
 
 app = FastAPI()
 
@@ -39,11 +37,26 @@ FLASHCARDS_DIR = Path("flashcards")
 UPLOAD_DIR.mkdir(exist_ok=True)
 FLASHCARDS_DIR.mkdir(exist_ok=True)
 
-# Initialize T5 model and tokenizer
+# Initialize Phi-3-mini model and tokenizer
 try:
-    tokenizer = T5Tokenizer.from_pretrained("t5-small")
-    model = T5ForConditionalGeneration.from_pretrained("t5-small")
-    logger.info("T5 model loaded successfully")
+    model_name  = "microsoft/phi-3-mini-4k-instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    if torch.backends.mps.is_available():
+        # For MPS, use float32 instead of float16
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float32,  # Use float32 for MPS compatibility
+            device_map="auto"
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+        
+    logger.info("Phi-3-mini model loaded successfully")
 except Exception as e:
     logger.error(f"Failed to initialize T5 model: {str(e)}")
     raise
@@ -71,16 +84,36 @@ def extract_text_from_image(image: Image.Image) -> str:
                 detail="Tesseract OCR is not installed or not found. Please install it from https://github.com/UB-Mannheim/tesseract/wiki"
             )
 
-        # Preprocess image for better OCR results
-        # Convert to grayscale
-        image = image.convert('L')
-        # Increase contrast
-        image = Image.eval(image, lambda x: 255 if x > 128 else 0)
+        def preprocess_image(img):
+            # Convert to grayscale
+            img = img.convert('L')
+            
+            #resize image
+            min_width = 1000
+            if img.width < min_width:
+                ratio = min_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((min_width, new_height), Image.Resampling.LANCZOS)
+
+            # apply adaptive thresholding
+            img_array = np.array(img)
+            img_array = cv2.adaptiveThreshold(
+                img_array, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                11, 2
+            )
+
+            # denoise
+            img_array = cv2.fastNlMeansDenoising(img_array)
+
+            return Image.fromarray(img_array)
         
-        # Extract text
-        text = pytesseract.image_to_string(image)
+        # apply OCR
+        img = preprocess_image(image)
+        text = pytesseract.image_to_string(img, lang='eng')
         text = text.strip()
-        
+
         if not text:
             logger.warning("No text was extracted from the image")
             raise HTTPException(status_code=400, detail="No text could be extracted from the image. Please ensure the image contains clear, readable text.")
@@ -94,31 +127,47 @@ def extract_text_from_image(image: Image.Image) -> str:
         raise HTTPException(status_code=500, detail=f"Failed to extract text: {str(e)}")
 
 def generate_summary(text: str) -> str:
-    """Generate a summary of the text using T5."""
+    """Generate a summary of the text using Phi-3-mini."""
     try:
-        # Prepare input text
-        input_text = f"summarize: {text}"
+        # prompt
+        prompt = f"""### Instruction: Summarize the following text in a concise way:
+
+### Input:
+{text}
+
+### Response:
+"""
+
+        # tokenize
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
-        # Tokenize
-        inputs = tokenizer.encode(
-            input_text,
-            max_length=512,
-            truncation=True,
-            return_tensors="pt"
-        )
         
         # Generate summary
-        summary_ids = model.generate(
-            inputs,
-            max_length=150,
-            min_length=40,
-            length_penalty=2.0,
-            num_beams=4,
-            early_stopping=True
-        )
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=150,
+                min_new_tokens=30,
+                temperature=0.7,
+                top_p=0.95,
+                top_k=50,
+                repetition_penalty=1.1,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id
+            )
         
         # Decode summary
-        summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+        summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        #extract response
+        try:
+            summary = summary.split("### Response:")[1].strip()
+        except:
+            summary = summary.strip()
+        
+        logger.info(f"Successfully generated summary with {len(summary)} characters")
+        
         return summary
     except Exception as e:
         logger.error(f"Failed to generate summary: {str(e)}")
