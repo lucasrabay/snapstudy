@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, GenerationConfig
 import torch
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,26 +39,35 @@ FLASHCARDS_DIR.mkdir(exist_ok=True)
 
 # Initialize Phi-3-mini model and tokenizer
 try:
-    model_name  = "microsoft/phi-3-mini-4k-instruct"
+    model_name  = "facebook/bart-large-cnn"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     if torch.backends.mps.is_available():
-        # For MPS, use float32 instead of float16
-        model = AutoModelForCausalLM.from_pretrained(
+        # For Mac, use float32 instead of float16
+        model = AutoModelForSeq2SeqLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float32,  # Use float32 for MPS compatibility
-            device_map="auto"
+            torch_dtype=torch.float32,
+            device_map=None
         )
-    else:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto"
-        )
+        model = model.to('mps')    
+    
+
+    generation_config = GenerationConfig(
+        max_new_tokens=200,
+        min_new_tokens=50,
+        temperature=0.7,
+        top_p=0.95,
+        top_k=50,
+        repetition_penalty=1.1,
+        do_sample=True,
+        num_beams=4,
+        early_stopping=True,
+        pad_token_id=tokenizer.eos_token_id
+    )
         
-    logger.info("Phi-3-mini model loaded successfully")
+    logger.info("model loaded successfully")
 except Exception as e:
-    logger.error(f"Failed to initialize T5 model: {str(e)}")
+    logger.error(f"Failed to initialize model: {str(e)}")
     raise
 
 def save_image(image: Image.Image, filename: str) -> str:
@@ -85,33 +94,36 @@ def extract_text_from_image(image: Image.Image) -> str:
             )
 
         def preprocess_image(img):
+            img_array = np.array(img)
+
             # Convert to grayscale
-            img = img.convert('L')
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
             
             #resize image
-            min_width = 1000
-            if img.width < min_width:
-                ratio = min_width / img.width
-                new_height = int(img.height * ratio)
-                img = img.resize((min_width, new_height), Image.Resampling.LANCZOS)
+            height, width = img_array.shape
+            max_dimension = 2000
+            if max(height, width) > max_dimension:
+                scale = max_dimension / max(height, width)
+                img_array = cv2.resize(img_array, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+            img_array = cv2.bilateralFilter(img_array, 9, 75, 75)            
 
             # apply adaptive thresholding
-            img_array = np.array(img)
             img_array = cv2.adaptiveThreshold(
                 img_array, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY,
                 11, 2
-            )
-
-            # denoise
-            img_array = cv2.fastNlMeansDenoising(img_array)
+            )          
 
             return Image.fromarray(img_array)
         
-        # apply OCR
+        # preprocess
         img = preprocess_image(image)
-        text = pytesseract.image_to_string(img, lang='eng')
+
+        # apply ocr
+        custom_config = r'--oem 3 --psm 6 -l eng'
+        text = pytesseract.image_to_string(img, config=custom_config)
         text = text.strip()
 
         if not text:
@@ -130,16 +142,16 @@ def generate_summary(text: str) -> str:
     """Generate a summary of the text using Phi-3-mini."""
     try:
         # prompt
-        prompt = f"""### Instruction: Summarize the following text in a concise way:
-
-### Input:
-{text}
-
-### Response:
-"""
+        prompt = f"Please provide a detailed summary of the following text, including all key points and main ideas:\n\n{text}\n\nSummary:"
 
         # tokenize
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=1024,
+            padding=True
+        )
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
         
         
@@ -147,14 +159,7 @@ def generate_summary(text: str) -> str:
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=150,
-                min_new_tokens=30,
-                temperature=0.7,
-                top_p=0.95,
-                top_k=50,
-                repetition_penalty=1.1,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id
+                generation_config=model.generation_config
             )
         
         # Decode summary
