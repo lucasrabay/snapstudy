@@ -142,14 +142,21 @@ def generate_summary(text: str) -> str:
     """Generate a summary of the text using Phi-3-mini."""
     try:
         # prompt
-        prompt = f"Please provide a detailed summary of the following text, including all key points and main ideas:\n\n{text}\n\nSummary:"
+        prompt = f"""Please provide a clear, concise, and grammatically correct summary of the following text. 
+        Focus on the main points and ensure proper sentence structure and grammar.
+        Format the summary in a way that's easy to understand and remember.
+        
+        Text to summarize:
+        {text}
+        
+        Summary:"""
 
         # tokenize
         inputs = tokenizer(
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=1024,
+            max_length=2048,
             padding=True
         )
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
@@ -159,33 +166,52 @@ def generate_summary(text: str) -> str:
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                generation_config=model.generation_config
+                generation_config=model.generation_config,
+                num_beams=5,
+                length_penalty=1.0,
+                no_repeat_ngram_size=3
             )
         
         # Decode summary
         summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        #extract response
-        try:
-            summary = summary.split("### Response:")[1].strip()
-        except:
-            summary = summary.strip()
+        summary = clean_summary(summary)
         
         logger.info(f"Successfully generated summary with {len(summary)} characters")
-        
         return summary
     except Exception as e:
         logger.error(f"Failed to generate summary: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to generate summary")
 
+
+def clean_summary(text: str) -> str:
+    """" Clean and format the generated summary. """
+    # remove response markers
+    text = text.replace("### Response:", '').strip()
+
+    # common ocr mistakes
+    text = text.replace(" .", ".")
+    text = text.replace(" ,", ",")
+    text = text.replace("  ", " ")
+
+    # Ensure proper sentence capitalization
+    sentences = text.split(". ")
+    sentences = [s.capitalize() for s in sentences]
+    text = ". ".join(sentences)
+    
+    # Ensure proper paragraph formatting
+    paragraphs = text.split("\n\n")
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+    text = "\n\n".join(paragraphs)
+    
+    return text    
+
 def generate_flashcard_data(image_path: str, original_text: str, summary: str) -> dict:
     """Generate comprehensive flashcard data."""
     try:
-        # Generate additional metadata
         image_size = os.path.getsize(image_path)
         creation_time = datetime.now().isoformat()
         
-        # Create a more structured flashcard
         flashcard = {
             "id": str(uuid.uuid4()),
             "front": {
@@ -202,7 +228,7 @@ def generate_flashcard_data(image_path: str, original_text: str, summary: str) -
                 "content": summary,
                 "original_text": original_text,
                 "metadata": {
-                    "source": "T5-small",
+                    "source": "BART-large-CNN",
                     "generated_at": creation_time
                 }
             },
