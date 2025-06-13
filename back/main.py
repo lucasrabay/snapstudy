@@ -37,7 +37,7 @@ FLASHCARDS_DIR = Path("flashcards")
 UPLOAD_DIR.mkdir(exist_ok=True)
 FLASHCARDS_DIR.mkdir(exist_ok=True)
 
-# Initialize Phi-3-mini model and tokenizer
+# Initialize model
 try:
     model_name  = "facebook/bart-large-cnn"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -53,15 +53,17 @@ try:
     
 
     generation_config = GenerationConfig(
-        max_new_tokens=200,
-        min_new_tokens=50,
+        max_new_tokens=500,
+        min_new_tokens=100,
         temperature=0.7,
         top_p=0.95,
         top_k=50,
         repetition_penalty=1.1,
         do_sample=True,
-        num_beams=4,
+        num_beams=5,
         early_stopping=True,
+        length_penalty=1.5,
+        no_repeat_ngram_size=3,
         pad_token_id=tokenizer.eos_token_id
     )
         
@@ -141,15 +143,15 @@ def extract_text_from_image(image: Image.Image) -> str:
 def generate_summary(text: str) -> str:
     """Generate a summary of the text using Phi-3-mini."""
     try:
-        # prompt
-        prompt = f"""Please provide a clear, concise, and grammatically correct summary of the following text. 
-        Focus on the main points and ensure proper sentence structure and grammar.
-        Format the summary in a way that's easy to understand and remember.
+        prompt = f"""Create a comprehensive and detailed summary of the following text. 
+        Include all key components, their purposes, and relationships.
+        Break down complex concepts into clear explanations.
+        Ensure the summary is thorough while maintaining clarity.
         
         Text to summarize:
         {text}
         
-        Summary:"""
+        Detailed Summary:"""
 
         # tokenize
         inputs = tokenizer(
@@ -166,16 +168,16 @@ def generate_summary(text: str) -> str:
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                generation_config=model.generation_config,
-                num_beams=5,
-                length_penalty=1.0,
-                no_repeat_ngram_size=3
+                generation_config=model.generation_config
             )
         
         # Decode summary
         summary = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
         summary = clean_summary(summary)
+
+        if "Detailed Summary:" in summary:
+            summary = summary.split("Detailed Summary:")[-1].strip()
         
         logger.info(f"Successfully generated summary with {len(summary)} characters")
         return summary
@@ -186,6 +188,11 @@ def generate_summary(text: str) -> str:
 
 def clean_summary(text: str) -> str:
     """" Clean and format the generated summary. """
+    text = text.replace("Create a comprehensive and detailed summary of the following text.", "")
+    text = text.replace("Include all key components, their purposes, and relationships.", "")
+    text = text.replace("Break down complex concepts into clear explanations.", "")
+    text = text.replace("Ensure the summary is thorough while maintaining clarity.", "")     
+
     # remove response markers
     text = text.replace("### Response:", '').strip()
 
