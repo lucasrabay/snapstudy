@@ -19,6 +19,9 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+model = None
+tokenizer = None
+generation_config = None
 
 app = FastAPI()
 
