@@ -20,7 +20,7 @@ jobs:
         python-version: '3.11'
 
     - name: Install Tesseract OCR
-      run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+      run: brew install tesseract
 
     - name: Install dependencies
       run: |
